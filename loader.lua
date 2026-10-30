@@ -54,7 +54,32 @@ local function saveKey(key)
 	end)
 end
 
-local games = {
+local function httpGet(url)
+	local ok, body = pcall(function()
+		return game:HttpGet(url)
+	end)
+	if ok and type(body) == "string" and body ~= "" then
+		return body
+	end
+	local synApi = type(rawget(Environment, "syn")) == "table" and rawget(Environment, "syn") or nil
+	local requester = rawget(Environment, "request")
+		or rawget(Environment, "http_request")
+		or synApi and rawget(synApi, "request")
+		or rawget(_G, "request")
+		or rawget(_G, "http_request")
+	if type(requester) == "function" then
+		local requestOk, response = pcall(requester, { Url = url, Method = "GET" })
+		if requestOk and type(response) == "table" then
+			local responseBody = response.Body or response.body
+			if type(responseBody) == "string" and responseBody ~= "" then
+				return responseBody
+			end
+		end
+	end
+	error("HTTP request failed", 0)
+end
+
+local GameCatalog = {
 	[10258991999] = { 101770480176177, "53b9be9121357bb73a0295e91d178357" },
 	[10563114921] = { 107778070777162, "4836c1b2793b60c954f44b523235378a" },
 	[10629695169] = { 72858262610964, "cd2b5a1858999ebe95a2ca847ebb62af" },
@@ -69,7 +94,9 @@ local games = {
 	[10766056678] = { 99679692310083, "5f20847938331adde420ee401d23440b" },
 	[10292064735] = { 97927337336367, "60bb8ad8c4b6a37440f0a4bd0b895316" },
 	[6931042565] = { 73956553001240, "6c95c648da3b4cbc5a8a8c3833fef1ef" },
-	[10758824872] = { 93523763376122, "694c5c6f33834229ed378bcc35d26f45" },
+	[93523763376122] = { 93523763376122, "926344409ff6fc1d5fa237e3a9392383" },
+	[66654135] = { 142823291, "f3ff01788ca2247c662a6a4fecaa2c56" },
+	[10758824872] = { 131652231424227, "694c5c6f33834229ed378bcc35d26f45" },
 }
 
 local function createWindow()
@@ -199,7 +226,7 @@ local function createWindow()
 			local path = "sentinel-logo.webp"
 			local hasFile = type(isfile) == "function" and isfile(path)
 			if not hasFile then
-				writefile(path, game:HttpGet(logoUrl))
+				writefile(path, httpGet(logoUrl))
 			end
 			return assetLoader(path)
 		end)
@@ -561,11 +588,11 @@ local function createWindow()
 end
 
 local function findLoader()
-	local match = games[game.GameId]
+	local match = GameCatalog[game.GameId]
 	if match then
 		return match[2]
 	end
-	for _, entry in pairs(games) do
+	for _, entry in pairs(GameCatalog) do
 		if entry[1] == game.PlaceId then
 			return entry[2]
 		end
@@ -587,13 +614,35 @@ local function notify(message, highlighted)
 	return messageId
 end
 
+local function copyToClipboard(value)
+	local clipboard = rawget(Environment, "setclipboard")
+		or rawget(Environment, "toclipboard")
+		or rawget(_G, "setclipboard")
+		or rawget(_G, "toclipboard")
+	return type(clipboard) == "function" and pcall(clipboard, value) or false
+end
+
+local function compileChunk(source)
+	local compiler = rawget(Environment, "loadstring")
+		or rawget(Environment, "load")
+		or rawget(_G, "loadstring")
+		or rawget(_G, "load")
+	if type(compiler) ~= "function" then
+		return nil, "No compatible Lua compiler is available"
+	end
+	local ok, chunk = pcall(compiler, source)
+	if not ok or type(chunk) ~= "function" then
+		return nil, "Loader could not compile"
+	end
+	return chunk
+end
+
 local function copyLink()
 	if copying or running then
 		return
 	end
 	copying = true
-	local clipboard = setclipboard or toclipboard
-	local copied = type(clipboard) == "function" and pcall(clipboard, keyLink)
+	local copied = copyToClipboard(keyLink)
 	ui.copy.Text = copied and "COPIED" or "GET A KEY"
 	local id = notify(copied and "Link copied to clipboard." or keyLink, copied)
 	task.delay(2, function()
@@ -635,13 +684,13 @@ local function submitKey()
 	task.spawn(function()
 		local loaded = pcall(function()
 			Environment.script_key = key
-			local source = game:HttpGet("https://vampauth.com/v1/loaders/" .. loader .. ".lua")
+			local source = httpGet("https://vampauth.com/v1/loaders/" .. loader .. ".lua")
 			if not ui.exists() then
 				return
 			end
-			local run = loadstring(source)
-			if type(run) ~= "function" then
-				error("Loader could not compile", 0)
+			local run, reason = compileChunk(source)
+			if not run then
+				error(reason, 0)
 			end
 			notify("Running loader...", true)
 			run()
