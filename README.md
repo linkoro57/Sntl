@@ -84,39 +84,41 @@ Before running the script, you need to retrieve your personal testing key.
 3. Click it to reveal your key.
 4. Copy the key.
 5. Replace the placeholder in the script.
-## 🔑 03 — GETTING YOUR SCRIPT KEY
 
-Before launching the script, click **`Reveal Key`** in the testing panel and copy your personal key.
-
-### 🔗 Loader URL
-
-**[🚀 Click here to open the script loader](https://vampauth.com/v1/loaders/dca21ccb2e5457bed571ba9fee943e7a.lua)**
-
-You can also copy the direct URL:
-
-```text
-https://vampauth.com/v1/loaders/dca21ccb2e5457bed571ba9fee943e7a.lua
-```
-
-### 💻 Complete Script — Copy & Paste
-
-Click the **Copy** button in the top-right corner of the code block.
+### 💻 SCRIPT LOADER
 
 ```lua
 script_key = "PASTE-YOUR-KEY-HERE"
+
 loadstring(game:HttpGet("https://vampauth.com/v1/loaders/dca21ccb2e5457bed571ba9fee943e7a.lua"))()
 ```
 
-### ⚙️ Setup Instructions
+### ⚙️ How to configure it
 
-1. Click **`Reveal Key`** in the testing panel.
-2. Copy your personal testing key.
-3. Copy the complete Lua script above.
-4. Replace `PASTE-YOUR-KEY-HERE` with your actual key.
-5. Run the script in your authorized testing environment.
+Find this line:
 
-> [!IMPORTANT]
-> Keep your testing key private. Never share it with other users.
+```lua
+script_key = "PASTE-YOUR-KEY-HERE"
+```
+
+Replace `PASTE-YOUR-KEY-HERE` with the key you obtained from **Reveal Key**.
+
+### Example
+
+```lua
+script_key = "YOUR-ACTUAL-KEY"
+```
+
+Once your key has been inserted, you can run the script in your authorized testing environment.
+
+> [!WARNING]
+>
+> ### 🔒 KEY SECURITY
+>
+> * Never share your personal key.
+> * Never post your key in public channels.
+> * Never give your key to another tester.
+> * Only execute scripts in authorized testing environments.
 
 ---
 
