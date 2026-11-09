@@ -81,6 +81,7 @@ end
 
 local GameCatalog = {
 	[101770480176177] = "53b9be9121357bb73a0295e91d178357",
+	[113218456271570] = "53b9be9121357bb73a0295e91d178357",
 	[107778070777162] = "4836c1b2793b60c954f44b523235378a",
 	[72858262610964] = "cd2b5a1858999ebe95a2ca847ebb62af",
 	[126987974021910] = "0cdb6f3516494459713f87747f1b7cc8",
@@ -629,6 +630,29 @@ local function compileChunk(source)
 	return chunk
 end
 
+local function queueAfterTeleport(loader, key)
+	local synApi = type(rawget(Environment, "syn")) == "table" and rawget(Environment, "syn") or nil
+	local fluxusApi = type(rawget(Environment, "fluxus")) == "table" and rawget(Environment, "fluxus") or nil
+	local queue = rawget(Environment, "queue_on_teleport")
+		or rawget(Environment, "queueonteleport")
+		or rawget(Environment, "queueteleport")
+		or synApi and rawget(synApi, "queue_on_teleport")
+		or fluxusApi and rawget(fluxusApi, "queue_on_teleport")
+		or rawget(_G, "queue_on_teleport")
+		or rawget(_G, "queueonteleport")
+		or rawget(_G, "queueteleport")
+	if type(queue) ~= "function" then
+		return false
+	end
+	local url = "https://vampauth.com/v1/loaders/" .. loader .. ".lua"
+	local source = string.format(
+		"if not game:IsLoaded() then game.Loaded:Wait() end\nlocal e=getgenv and getgenv() or _G\ne.script_key=%q\nlocal s=game:HttpGet(%q)\nlocal f=(e.loadstring or e.load or loadstring or load)(s)\nif f then f() end",
+		key,
+		url
+	)
+	return pcall(queue, source)
+end
+
 local function copyLink()
 	if copying or running then
 		return
@@ -685,6 +709,7 @@ local function submitKey()
 				error(reason, 0)
 			end
 			notify("Running loader...", true)
+			queueAfterTeleport(loader, key)
 			run()
 		end)
 		key = nil
