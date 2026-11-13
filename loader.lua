@@ -15,7 +15,7 @@ end
 local logoUrl =
 	"https://vampauth.com/api/avatar/file/avatars/19499984-8998-4f2a-8253-8e4d1b89e271/uxpzw9ebamf_1792664527021.webp"
 local keyLink = "https://vampauth.com/sntl/flow"
-local keyFolder = "SentinelHub"
+local keyFolder = "Sentinel Studio"
 local keyFile = keyFolder .. "/key.txt"
 
 local function readSavedKey()
@@ -95,10 +95,19 @@ local GameCatalog = {
 	[99679692310083] = "5f20847938331adde420ee401d23440b",
 	[97927337336367] = "60bb8ad8c4b6a37440f0a4bd0b895316",
 	[73956553001240] = "6c95c648da3b4cbc5a8a8c3833fef1ef",
-	[93523763376122] = "926344409ff6fc1d5fa237e3a9392383",
+	[93523763376122] = "926344409ff6fc1d5fa237e3a9392383", -- Ride a Dino (and Catch Them All)
 	[142823291] = "f3ff01788ca2247c662a6a4fecaa2c56",
-	[131652231424227] = "694c5c6f33834229ed378bcc35d26f45",
 	[116448925875915] = "116c40ef2e4529b5d5cf1281231bbe63",
+	[79546208627805] = "36f18f2df77cb696670f7291e460592c", -- 99 Nights in the Forest
+	[13379208636] = "7d7169f946b0b029b83e0c578b8eae14", -- Attack on Titan Revolution
+	[130878180532794] = "23134d49c0c1cb5d61220a2c59b38276", -- RoChess
+}
+
+-- Recognize the same games after teleporting between lobbies and mission places.
+local UniverseCatalog = {
+	[7326934954] = "36f18f2df77cb696670f7291e460592c", -- 99 Nights in the Forest
+	[4658598196] = "7d7169f946b0b029b83e0c578b8eae14", -- Attack on Titan Revolution
+	[10773907070] = "23134d49c0c1cb5d61220a2c59b38276", -- RoChess
 }
 
 local function createWindow()
@@ -590,7 +599,7 @@ local function createWindow()
 end
 
 local function findLoader()
-	return GameCatalog[game.PlaceId]
+	return GameCatalog[game.PlaceId] or UniverseCatalog[game.GameId]
 end
 
 local ui = createWindow()
