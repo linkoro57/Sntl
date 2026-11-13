@@ -3,11 +3,43 @@ local TweenService = game:GetService("TweenService")
 local Input = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 
-local Environment = getgenv and getgenv() or _G
-local IdentitySetter = Environment.setthreadidentity
-	or Environment.set_thread_identity
-	or Environment.setidentity
-	or type(Environment.syn) == "table" and Environment.syn.set_thread_identity
+-- Resolve capabilities by type: a truthy unsupported alias must not hide a working one.
+local Environment = _G
+if type(getgenv) == "function" then
+	local ok, environment = pcall(getgenv)
+	if ok and type(environment) == "table" then
+		Environment = environment
+	end
+end
+local function capability(...)
+	for index = 1, select("#", ...) do
+		local name = select(index, ...)
+		local value = Environment[name]
+		if type(value) == "function" then
+			return value
+		end
+		value = getfenv()[name]
+		if type(value) == "function" then
+			return value
+		end
+		value = _G[name]
+		if type(value) == "function" then
+			return value
+		end
+	end
+	return nil
+end
+local function nestedCapability(namespace, name)
+	for _, root in ipairs({ Environment, getfenv(), _G }) do
+		local api = root[namespace]
+		if type(api) == "table" and type(api[name]) == "function" then
+			return api[name]
+		end
+	end
+	return nil
+end
+local IdentitySetter = capability("setthreadidentity", "set_thread_identity", "setidentity")
+	or nestedCapability("syn", "set_thread_identity")
 if type(IdentitySetter) == "function" then
 	pcall(IdentitySetter, 6)
 end
@@ -17,99 +49,219 @@ local logoUrl =
 local keyLink = "https://vampauth.com/sntl/flow"
 local keyFolder = "Sentinel Studio"
 local keyFile = keyFolder .. "/key.txt"
+local MAX_KEY_BYTES = 1024
+local MAX_SOURCE_BYTES = 8 * 1024 * 1024
+local REQUEST_TIMEOUT = 12
+local MAX_ATTEMPTS = 3
+
+local function normalizeKey(value)
+	if type(value) ~= "string" or #value > MAX_KEY_BYTES then
+		return nil
+	end
+	value = value:gsub("^\239\187\191", ""):match("^%s*(.-)%s*$")
+	if value == "" or value:find("[%z\1-\31\127]") then
+		return nil
+	end
+	return value
+end
 
 local function readSavedKey()
-	if type(isfile) ~= "function" or type(readfile) ~= "function" then
+	local reader = capability("readfile")
+	local exists = capability("isfile")
+	if not reader then
 		return nil
 	end
 	local ok, saved = pcall(function()
-		if not isfile(keyFile) then
+		if exists and not exists(keyFile) then
 			return nil
 		end
-		return readfile(keyFile)
+		return reader(keyFile)
 	end)
 	if not ok or type(saved) ~= "string" then
 		return nil
 	end
-	saved = saved:match("^%s*(.-)%s*$")
-	return saved ~= "" and saved or nil
+	return normalizeKey(saved)
 end
 
 local function saveKey(key)
-	if type(writefile) ~= "function" then
+	local writer = capability("writefile")
+	if not writer then
 		return false
 	end
 	return pcall(function()
-		if type(makefolder) == "function" then
+		local makeFolder = capability("makefolder")
+		local isFolder = capability("isfolder")
+		if makeFolder then
 			local folderExists = false
-			if type(isfolder) == "function" then
-				local ok, result = pcall(isfolder, keyFolder)
+			if isFolder then
+				local ok, result = pcall(isFolder, keyFolder)
 				folderExists = ok and result == true
 			end
 			if not folderExists then
-				pcall(makefolder, keyFolder)
+				pcall(makeFolder, keyFolder)
 			end
 		end
-		writefile(keyFile, key)
+		writer(keyFile, key)
 	end)
 end
 
-local function httpGet(url)
-	local ok, body = pcall(function()
-		return game:HttpGet(url)
+local function fail(code)
+	-- Never surface a provider response or a script error that could contain the key.
+	error({ sentinelLoaderError = code }, 0)
+end
+
+local function stopTask(thread)
+	if type(task.cancel) == "function" and coroutine.status(thread) ~= "dead" then
+		pcall(task.cancel, thread)
+	end
+end
+
+local function boundedCall(callback, isActive)
+	local result
+	local thread = task.spawn(function()
+		result = table.pack(pcall(callback))
 	end)
-	if ok and type(body) == "string" and body ~= "" then
-		return body
-	end
-	local synApi = type(rawget(Environment, "syn")) == "table" and rawget(Environment, "syn") or nil
-	local requester = rawget(Environment, "request")
-		or rawget(Environment, "http_request")
-		or synApi and rawget(synApi, "request")
-		or rawget(_G, "request")
-		or rawget(_G, "http_request")
-	if type(requester) == "function" then
-		local requestOk, response = pcall(requester, { Url = url, Method = "GET" })
-		if requestOk and type(response) == "table" then
-			local responseBody = response.Body or response.body
-			if type(responseBody) == "string" and responseBody ~= "" then
-				return responseBody
-			end
+	local deadline = os.clock() + REQUEST_TIMEOUT
+	while not result do
+		if isActive and not isActive() then
+			stopTask(thread)
+			fail("cancelled")
 		end
+		if os.clock() >= deadline then
+			stopTask(thread)
+			return false, nil, "timeout", true
+		end
+		task.wait(0.05)
 	end
-	error("HTTP request failed", 0)
+	if isActive and not isActive() then
+		fail("cancelled")
+	end
+	if not result[1] then
+		return false, nil, "network", true
+	end
+	return true, table.unpack(result, 2, result.n)
+end
+
+local function validateBody(body)
+	if type(body) ~= "string" or body:match("^%s*$") then
+		return nil, "empty", true
+	end
+	if #body > MAX_SOURCE_BYTES then
+		return nil, "tooLarge", false
+	end
+	return body
+end
+
+local function httpGet(url, isActive)
+	local requester = capability("request", "http_request") or nestedCapability("syn", "request")
+	local lastError = "network"
+	for attempt = 1, MAX_ATTEMPTS do
+		if isActive and not isActive() then
+			fail("cancelled")
+		end
+		local ok, body, reason, retryable, retryAfter = boundedCall(function()
+			if requester then
+				local requestOk, response = pcall(requester, {
+					Url = url,
+					Method = "GET",
+					Timeout = REQUEST_TIMEOUT,
+				})
+				if requestOk and type(response) == "table" then
+					local status = tonumber(response.StatusCode or response.Status or response.status_code)
+					if status and (status < 200 or status >= 300) then
+						local headers = response.Headers or response.headers
+						local delay = type(headers) == "table" and tonumber(headers["Retry-After"] or headers["retry-after"])
+						return nil, "http" .. tostring(status), status == 408 or status == 425 or status == 429 or status >= 500, delay
+					end
+					if response.Success ~= false then
+						return validateBody(response.Body or response.body)
+					end
+				end
+			end
+			-- Some executors only provide HttpGet, others expose a broken request alias.
+			return validateBody(game:HttpGet(url))
+		end, isActive)
+		if ok and body then
+			return body
+		end
+		lastError = reason or "network"
+		if not retryable or attempt == MAX_ATTEMPTS then
+			break
+		end
+		local delay = math.clamp(retryAfter or 2 ^ (attempt - 1), 0, 5)
+		local deadline = os.clock() + delay
+		repeat
+			if isActive and not isActive() then
+				fail("cancelled")
+			end
+			task.wait(0.05)
+		until os.clock() >= deadline
+	end
+	return fail(lastError)
 end
 
 local GameCatalog = {
-	[101770480176177] = "53b9be9121357bb73a0295e91d178357",
-	[113218456271570] = "53b9be9121357bb73a0295e91d178357",
-	[107778070777162] = "4836c1b2793b60c954f44b523235378a",
-	[72858262610964] = "cd2b5a1858999ebe95a2ca847ebb62af",
-	[126987974021910] = "0cdb6f3516494459713f87747f1b7cc8",
-	[107535308163741] = "b92ef76518127fd7f7ee5173cf3b0ca9",
-	[113290951185459] = "6774f2ac818c872ba6cade68c0f72f15",
-	[114326934417838] = "60afde9ea5ca19a22d57c9421f145958",
-	[81440632616906] = "ae0e4359ac03cad856c83e5516c019a0",
-	[140067658687251] = "777402ee029f29d5349f25eca2185acb",
-	[99409088950210] = "c538c3c9846865f5544070282c530857",
-	[76943966208523] = "e9331de35c476acd84aa69872be51519",
-	[99679692310083] = "5f20847938331adde420ee401d23440b",
-	[97927337336367] = "60bb8ad8c4b6a37440f0a4bd0b895316",
-	[73956553001240] = "6c95c648da3b4cbc5a8a8c3833fef1ef",
+	[101770480176177] = "53b9be9121357bb73a0295e91d178357", -- Command An Army
+	[113218456271570] = "53b9be9121357bb73a0295e91d178357", -- Command An Army (Zombie)
+	[107778070777162] = "4836c1b2793b60c954f44b523235378a", -- Steal An Egg
+	[72858262610964] = "529acecb435a82afaf92fe0e83fb04f2", -- Tap Simulator REBORN
+	[126987974021910] = "d9a6312cd7f9df96799de71e604fc990", -- Illegal Soccer
+	[107535308163741] = "b92ef76518127fd7f7ee5173cf3b0ca9", -- Huss Valley
+	[113290951185459] = "6774f2ac818c872ba6cade68c0f72f15", -- Anime Dice
+	[114326934417838] = "60afde9ea5ca19a22d57c9421f145958", -- Break and Steal an Egg
+	[81440632616906] = "ae0e4359ac03cad856c83e5516c019a0", -- Dig to Earth's CORE!
+	[140067658687251] = "777402ee029f29d5349f25eca2185acb", -- Rope an Animal
+	[99409088950210] = "8f21934dbe603c29370d42602c94e3f0", -- Survive a Million Monkeys
+	[76943966208523] = "e9331de35c476acd84aa69872be51519", -- Clone to Steal Eggs
+	[99679692310083] = "5f20847938331adde420ee401d23440b", -- Steal Animal Egg
+	[97927337336367] = "60bb8ad8c4b6a37440f0a4bd0b895316", -- SCROOMS
+	[73956553001240] = "6c95c648da3b4cbc5a8a8c3833fef1ef", -- Volleyball Legends
 	[93523763376122] = "926344409ff6fc1d5fa237e3a9392383", -- Ride a Dino (and Catch Them All)
-	[142823291] = "f3ff01788ca2247c662a6a4fecaa2c56",
-	[116448925875915] = "116c40ef2e4529b5d5cf1281231bbe63",
+	[142823291] = "f3ff01788ca2247c662a6a4fecaa2c56", -- Murder Mystery 2
+	[116448925875915] = "116c40ef2e4529b5d5cf1281231bbe63", -- +1 Venom Evolution
 	[79546208627805] = "36f18f2df77cb696670f7291e460592c", -- 99 Nights in the Forest
 	[13379208636] = "7d7169f946b0b029b83e0c578b8eae14", -- Attack on Titan Revolution
 	[130878180532794] = "23134d49c0c1cb5d61220a2c59b38276", -- RoChess
 	[137629355240872] = "5d5bd3cb69e35584627a450143646231", -- GloryBound
+	[137151641329864] = "f809fd3b84be204c958647d437f58916", -- ROFRONT / RoWorld (RAW, latest version)
+	[85738654635245] = "b2301b971dc6f218e712eb9aafa0680b", -- Climb For Animals Eggs
+	[103363457515322] = "c38412b4e6c1214666590ee587137fe6", -- Chop A Forest
+	[116495829188952] = "639e85ed1cda04445dbdfc5c19e4db84", -- Dead Rails
+	[16732694052] = "d1cd28f95070997b56f4d836f295715c", -- Fisch
+	[101880234193261] = "62b231ab3aeefcfbfa0275dfcad0448e", -- Turbo Soccer
+	[120219252362013] = "e63b360b3ef4432784be44dfc06c891f", -- Throw Food For Animals
 }
 
 -- Recognize the same games after teleporting between lobbies and mission places.
 local UniverseCatalog = {
+	[10258991999] = "53b9be9121357bb73a0295e91d178357", -- Command An Army
+	[10563114921] = "4836c1b2793b60c954f44b523235378a", -- Steal An Egg
+	[10629695169] = "529acecb435a82afaf92fe0e83fb04f2", -- Tap Simulator REBORN
+	[10155360168] = "d9a6312cd7f9df96799de71e604fc990", -- Illegal Soccer
+	[10764627709] = "b92ef76518127fd7f7ee5173cf3b0ca9", -- Huss Valley
+	[10708913337] = "6774f2ac818c872ba6cade68c0f72f15", -- Anime Dice
+	[10765288803] = "60afde9ea5ca19a22d57c9421f145958", -- Break and Steal an Egg
+	[7468338447] = "ae0e4359ac03cad856c83e5516c019a0", -- Dig to Earth's CORE!
+	[10764415267] = "777402ee029f29d5349f25eca2185acb", -- Rope an Animal
+	[10673920146] = "8f21934dbe603c29370d42602c94e3f0", -- Survive a Million Monkeys
+	[10766008884] = "e9331de35c476acd84aa69872be51519", -- Clone to Steal Eggs
+	[10766056678] = "5f20847938331adde420ee401d23440b", -- Steal Animal Egg
+	[10292064735] = "60bb8ad8c4b6a37440f0a4bd0b895316", -- SCROOMS
+	[6931042565] = "6c95c648da3b4cbc5a8a8c3833fef1ef", -- Volleyball Legends
+	[10758824872] = "926344409ff6fc1d5fa237e3a9392383", -- Ride a Dino (and Catch Them All)
+	[66654135] = "f3ff01788ca2247c662a6a4fecaa2c56", -- Murder Mystery 2
+	[10769464063] = "116c40ef2e4529b5d5cf1281231bbe63", -- +1 Venom Evolution
 	[7326934954] = "36f18f2df77cb696670f7291e460592c", -- 99 Nights in the Forest
 	[4658598196] = "7d7169f946b0b029b83e0c578b8eae14", -- Attack on Titan Revolution
 	[10773907070] = "23134d49c0c1cb5d61220a2c59b38276", -- RoChess
 	[10768652372] = "5d5bd3cb69e35584627a450143646231", -- GloryBound
+	[10768172922] = "f809fd3b84be204c958647d437f58916", -- ROFRONT / RoWorld (RAW, latest version)
+	[10765490774] = "b2301b971dc6f218e712eb9aafa0680b", -- Climb For Animals Eggs
+	[10767386157] = "c38412b4e6c1214666590ee587137fe6", -- Chop A Forest
+	[7018190066] = "639e85ed1cda04445dbdfc5c19e4db84", -- Dead Rails
+	[5750914919] = "d1cd28f95070997b56f4d836f295715c", -- Fisch
+	[10767012496] = "62b231ab3aeefcfbfa0275dfcad0448e", -- Turbo Soccer
+	[10766972131] = "e63b360b3ef4432784be44dfc06c891f", -- Throw Food For Animals
 }
 
 local function createWindow()
@@ -604,6 +756,31 @@ local function findLoader()
 	return GameCatalog[game.PlaceId] or UniverseCatalog[game.GameId]
 end
 
+if not game:IsLoaded() then
+	game.Loaded:Wait()
+end
+local playerDeadline = os.clock() + 15
+while not Players.LocalPlayer and os.clock() < playerDeadline do
+	task.wait(0.05)
+end
+if not Players.LocalPlayer then
+	warn("[Sentinel Loader] Local player unavailable. Run the loader in a client session.")
+	return
+end
+
+-- Keep the execution lock across loader re-executions, scoped to this server/place.
+local runtimeKey = "__SentinelLoaderRuntime"
+local session = tostring(game.PlaceId) .. ":" .. tostring(game.JobId)
+local runtime = Environment[runtimeKey]
+if type(runtime) ~= "table" or runtime.version ~= 1 or runtime.session ~= session then
+	runtime = { version = 1, session = session, loaded = {} }
+	Environment[runtimeKey] = runtime
+end
+if runtime.attempt and runtime.attempt.stage == "downloading" then
+	runtime.attempt.cancelled = true
+	runtime.attempt = nil
+end
+
 local ui = createWindow()
 local savedKey = readSavedKey()
 if savedKey then
@@ -614,58 +791,190 @@ local messageId = 0
 
 local function notify(message, highlighted)
 	messageId = messageId + 1
-	ui.status(message, highlighted)
+	if ui.exists() then
+		ui.status(message, highlighted)
+	end
 	return messageId
 end
 
 local function copyToClipboard(value)
-	local clipboard = rawget(Environment, "setclipboard")
-		or rawget(Environment, "toclipboard")
-		or rawget(_G, "setclipboard")
-		or rawget(_G, "toclipboard")
-	return type(clipboard) == "function" and pcall(clipboard, value) or false
+	local clipboard = capability("setclipboard", "toclipboard")
+	if not clipboard then
+		return false
+	end
+	local ok, result = pcall(clipboard, value)
+	return ok and result ~= false
 end
 
 local function compileChunk(source)
-	local compiler = rawget(Environment, "loadstring")
-		or rawget(Environment, "load")
-		or rawget(_G, "loadstring")
-		or rawget(_G, "load")
-	if type(compiler) ~= "function" then
-		return nil, "No compatible Lua compiler is available"
+	local compiler = capability("loadstring", "load")
+	if not compiler then
+		return nil, "compiler"
 	end
-	local ok, chunk = pcall(compiler, source)
+	source = source:gsub("^\239\187\191", "")
+	local prefix = source:sub(1, 256):lower():match("^%s*(.*)")
+	if prefix:sub(1, 1) == "<" or prefix:sub(1, 1) == "{" or prefix:sub(1, 1) == "[" then
+		return nil, "response"
+	end
+	local ok, chunk = pcall(compiler, source, "=SentinelGameLoader")
 	if not ok or type(chunk) ~= "function" then
-		return nil, "Loader could not compile"
+		return nil, "compile"
 	end
 	return chunk
 end
 
-local function queueAfterTeleport(loader, key)
-	local synApi = type(rawget(Environment, "syn")) == "table" and rawget(Environment, "syn") or nil
-	local fluxusApi = type(rawget(Environment, "fluxus")) == "table" and rawget(Environment, "fluxus") or nil
-	local queue = rawget(Environment, "queue_on_teleport")
-		or rawget(Environment, "queueonteleport")
-		or rawget(Environment, "queueteleport")
-		or synApi and rawget(synApi, "queue_on_teleport")
-		or fluxusApi and rawget(fluxusApi, "queue_on_teleport")
-		or rawget(_G, "queue_on_teleport")
-		or rawget(_G, "queueonteleport")
-		or rawget(_G, "queueteleport")
-	if type(queue) ~= "function" then
-		return false
+-- The template carries itself to the next server, without reopening the key UI.
+local TeleportTemplate = [=[
+local function resume(key, loader, universe)
+	if not game:IsLoaded() then game.Loaded:Wait() end
+	if game.GameId ~= universe then return end
+	local environment = _G
+	if type(getgenv) == "function" then
+		local ok, value = pcall(getgenv)
+		if ok and type(value) == "table" then environment = value end
 	end
-	local url = "https://vampauth.com/v1/loaders/" .. loader .. ".lua"
-	local source = string.format(
-		"if not game:IsLoaded() then game.Loaded:Wait() end\nlocal e=getgenv and getgenv() or _G\ne.script_key=%q\nlocal s=game:HttpGet(%q)\nlocal f=(e.loadstring or e.load or loadstring or load)(s)\nif f then f() end",
-		key,
-		url
-	)
-	return pcall(queue, source)
+	local function resolve(...)
+		for index = 1, select("#", ...) do
+			local name = select(index, ...)
+			for _, root in ipairs({ environment, getfenv(), _G }) do
+				if type(root[name]) == "function" then return root[name] end
+			end
+		end
+		return nil
+	end
+	local function nested(namespace, name)
+		for _, root in ipairs({ environment, getfenv(), _G }) do
+			local api = root[namespace]
+			if type(api) == "table" and type(api[name]) == "function" then return api[name] end
+		end
+		return nil
+	end
+	local identity = resolve("setthreadidentity", "set_thread_identity", "setidentity") or nested("syn", "set_thread_identity")
+	if identity then pcall(identity, 6) end
+	local compiler = resolve("loadstring", "load")
+	if not compiler then warn("[Sentinel Loader] Lua compiler unavailable after teleport.") return end
+	local session = tostring(game.PlaceId) .. ":" .. tostring(game.JobId)
+	local runtime = environment.__SentinelLoaderRuntime
+	if type(runtime) ~= "table" or runtime.version ~= 1 or runtime.session ~= session then
+		runtime = { version = 1, session = session, loaded = {} }
+		environment.__SentinelLoaderRuntime = runtime
+	end
+	if runtime.loaded[loader] or runtime.attempt then return end
+	local attempt = { stage = "downloading" }
+	runtime.attempt = attempt
+	local previousKey = environment.script_key
+	local connection
+	local ok = pcall(function()
+		local requester = resolve("request", "http_request") or nested("syn", "request")
+		local body
+		for index = 1, 3 do
+			if attempt.cancelled or runtime.attempt ~= attempt then error("cancelled", 0) end
+			local result
+			local worker = task.spawn(function()
+				result = table.pack(pcall(function()
+					local url = "https://vampauth.com/v1/loaders/" .. loader .. ".lua"
+					if requester then
+						local success, response = pcall(requester, { Url = url, Method = "GET", Timeout = 12 })
+						if success and type(response) == "table" then
+							local status = tonumber(response.StatusCode or response.Status or response.status_code)
+							if status and (status < 200 or status >= 300) then
+								return nil, status == 408 or status == 425 or status == 429 or status >= 500
+								end
+							if response.Success ~= false then return response.Body or response.body, true end
+						end
+					end
+					return game:HttpGet(url), true
+				end))
+			end)
+			local deadline = os.clock() + 12
+			while not result and not attempt.cancelled and os.clock() < deadline do task.wait(0.05) end
+			if not result and type(task.cancel) == "function" then pcall(task.cancel, worker) end
+			if attempt.cancelled or runtime.attempt ~= attempt then error("cancelled", 0) end
+			if result and result[1] then
+				local value = result[2]
+				if type(value) == "string" and value:find("%S") then
+					assert(#value <= 8 * 1024 * 1024, "response too large")
+					body = value:gsub("^\239\187\191", "")
+					break
+				end
+				if result[3] == false then break end
+			end
+			if index < 3 then task.wait(index) end
+		end
+		assert(body, "download failed")
+		local prefix = body:match("^%s*(.)")
+		assert(prefix ~= "<" and prefix ~= "{" and prefix ~= "[", "unexpected response")
+		local chunk = compiler(body, "=SentinelGameLoader")
+		assert(type(chunk) == "function", "compile failed")
+		if attempt.cancelled or runtime.attempt ~= attempt then error("cancelled", 0) end
+		local player = game:GetService("Players").LocalPlayer
+		local playerDeadline = os.clock() + 15
+		while not player and os.clock() < playerDeadline do
+			task.wait(0.05)
+			player = game:GetService("Players").LocalPlayer
+		end
+		assert(player, "local player unavailable")
+		if attempt.cancelled or runtime.attempt ~= attempt then error("cancelled", 0) end
+		local queue = resolve("queue_on_teleport", "queueonteleport", "queueteleport")
+			or nested("syn", "queue_on_teleport") or nested("fluxus", "queue_on_teleport")
+		if player and queue then
+			local queued = false
+			connection = player.OnTeleport:Connect(function(state)
+				if queued or (state ~= Enum.TeleportState.Started and state ~= Enum.TeleportState.InProgress) then return end
+				queued = true
+				local source = "local template = " .. string.format("%q", template) .. "\n" .. template
+					.. "\nresume(" .. string.format("%q, %q, %d", key, loader, universe) .. ")"
+				local success, accepted = pcall(queue, source)
+				queued = success and accepted ~= false
+			end)
+		end
+		attempt.stage = "executing"
+		environment.script_key = key
+		chunk()
+	end)
+	if runtime.attempt == attempt then runtime.attempt = nil end
+	if ok then
+		runtime.loaded[loader] = true
+		runtime.teleportConnection = connection
+	else
+		if connection then connection:Disconnect() end
+		if attempt.stage == "executing" and environment.script_key == key then environment.script_key = previousKey end
+		warn("[Sentinel Loader] Resume failed. Run the loader again to retry.")
+	end
+end
+]=]
+
+local function armTeleport(loader, key)
+	local queue = capability("queue_on_teleport", "queueonteleport", "queueteleport")
+		or nestedCapability("syn", "queue_on_teleport")
+		or nestedCapability("fluxus", "queue_on_teleport")
+	if not queue then
+		return nil
+	end
+	if runtime.teleportConnection then
+		runtime.teleportConnection:Disconnect()
+		runtime.teleportConnection = nil
+	end
+	local source = "local template = " .. string.format("%q", TeleportTemplate) .. "\n" .. TeleportTemplate
+		.. "\nresume(" .. string.format("%q, %q, %d", key, loader, game.GameId) .. ")"
+	local queued = false
+	local connection = Players.LocalPlayer.OnTeleport:Connect(function(state)
+		if queued or (state ~= Enum.TeleportState.Started and state ~= Enum.TeleportState.InProgress) then
+			return
+		end
+		queued = true
+		local ok, accepted = pcall(queue, source)
+		queued = ok and accepted ~= false
+		if not queued then
+			warn("[Sentinel Loader] Could not queue the loader for teleport.")
+		end
+	end)
+	runtime.teleportConnection = connection
+	return connection
 end
 
 local function copyLink()
-	if copying or running then
+	if copying or running or not ui.exists() then
 		return
 	end
 	copying = true
@@ -673,10 +982,10 @@ local function copyLink()
 	ui.copy.Text = copied and "COPIED" or "GET A KEY"
 	local id = notify(copied and "Link copied to clipboard." or keyLink, copied)
 	task.delay(2, function()
+		copying = false
 		if not ui.exists() then
 			return
 		end
-		copying = false
 		ui.copy.Text = "GET A KEY"
 		if id == messageId then
 			notify("vampauth.com/sntl/flow")
@@ -684,13 +993,28 @@ local function copyLink()
 	end)
 end
 
+local ErrorMessages = {
+	network = "Network error. Check your connection and retry.",
+	timeout = "Download timed out. Please retry.",
+	empty = "Server returned an empty script. Please retry.",
+	tooLarge = "Downloaded script is too large.",
+	response = "Server returned an unexpected response.",
+	compiler = "Your executor has no compatible Lua compiler.",
+	compile = "Downloaded script could not compile.",
+	http401 = "Loader access denied (HTTP 401).",
+	http403 = "Loader access denied (HTTP 403).",
+	http404 = "Loader unavailable (HTTP 404).",
+	http429 = "Too many requests. Please retry later.",
+	runtime = "Script stopped with an error. Please retry.",
+}
+
 local function submitKey()
 	if running or not ui.exists() then
 		return
 	end
-	local key = ui.key.Text:match("^%s*(.-)%s*$")
-	if key == "" then
-		notify("Enter a key first.")
+	local key = normalizeKey(ui.key.Text)
+	if not key then
+		notify(ui.key.Text:match("^%s*$") and "Enter a key first." or "Paste a valid key.")
 		ui.key:CaptureFocus()
 		return
 	end
@@ -701,35 +1025,81 @@ local function submitKey()
 		return
 	end
 
-	saveKey(key)
+	if runtime.loaded[loader] then
+		notify("This script is already loaded.")
+		return
+	end
+	if runtime.attempt then
+		notify("A script is already loading or running.")
+		return
+	end
+	if not capability("loadstring", "load") then
+		notify(ErrorMessages.compiler)
+		return
+	end
 
+	local attempt = { stage = "downloading" }
+	runtime.attempt = attempt
 	running = true
 	ui.key:ReleaseFocus()
 	ui.loading(true)
 	notify("Downloading loader...", true)
 
 	task.spawn(function()
-		local loaded = pcall(function()
-			Environment.script_key = key
-			local source = httpGet("https://vampauth.com/v1/loaders/" .. loader .. ".lua")
-			if not ui.exists() then
-				return
-			end
+		local previousKey = Environment.script_key
+		local connection
+		local function isActive()
+			return runtime.attempt == attempt and not attempt.cancelled and ui.exists()
+		end
+		local loaded, failure = pcall(function()
+			local source = httpGet("https://vampauth.com/v1/loaders/" .. loader .. ".lua", isActive)
 			local run, reason = compileChunk(source)
 			if not run then
-				error(reason, 0)
+				fail(reason)
+			end
+			if not isActive() then
+				fail("cancelled")
 			end
 			notify("Running loader...", true)
-			queueAfterTeleport(loader, key)
+			connection = armTeleport(loader, key)
+			attempt.stage = "executing"
+			Environment.script_key = key
 			run()
 		end)
+		if runtime.attempt == attempt then
+			runtime.attempt = nil
+		end
+		if loaded then
+			runtime.loaded[loader] = true
+			-- A compiled script can still fail at runtime; preserve the old saved key then.
+			saveKey(key)
+		else
+			if connection then
+				connection:Disconnect()
+				if runtime.teleportConnection == connection then
+					runtime.teleportConnection = nil
+				end
+			end
+			if attempt.stage == "executing" and Environment.script_key == key then
+				Environment.script_key = previousKey
+			end
+		end
 		key = nil
+		running = false
 		if not ui.exists() then
 			return
 		end
-		running = false
 		ui.loading(false)
-		notify(loaded and "Loader finished." or "Couldn't run the loader. Try again.")
+		if loaded then
+			notify("Loader finished.")
+		else
+			local code = type(failure) == "table" and failure.sentinelLoaderError or "runtime"
+			if code ~= "cancelled" then
+				local message = ErrorMessages[code] or "Loader download failed. Please retry."
+				notify(message)
+				warn("[Sentinel Loader] " .. message)
+			end
+		end
 	end)
 end
 
