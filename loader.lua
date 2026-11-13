@@ -101,6 +101,7 @@ local GameCatalog = {
 	[79546208627805] = "36f18f2df77cb696670f7291e460592c", -- 99 Nights in the Forest
 	[13379208636] = "7d7169f946b0b029b83e0c578b8eae14", -- Attack on Titan Revolution
 	[130878180532794] = "23134d49c0c1cb5d61220a2c59b38276", -- RoChess
+	[137629355240872] = "5d5bd3cb69e35584627a450143646231", -- GloryBound
 }
 
 -- Recognize the same games after teleporting between lobbies and mission places.
@@ -108,6 +109,7 @@ local UniverseCatalog = {
 	[7326934954] = "36f18f2df77cb696670f7291e460592c", -- 99 Nights in the Forest
 	[4658598196] = "7d7169f946b0b029b83e0c578b8eae14", -- Attack on Titan Revolution
 	[10773907070] = "23134d49c0c1cb5d61220a2c59b38276", -- RoChess
+	[10768652372] = "5d5bd3cb69e35584627a450143646231", -- GloryBound
 }
 
 local function createWindow()
