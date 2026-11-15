@@ -230,6 +230,7 @@ local GameCatalog = {
 	[16732694052] = "d1cd28f95070997b56f4d836f295715c", -- Fisch
 	[101880234193261] = "62b231ab3aeefcfbfa0275dfcad0448e", -- Turbo Soccer
 	[120219252362013] = "e63b360b3ef4432784be44dfc06c891f", -- Throw Food For Animals
+	[116779912472448] = "7d4ee8ae3a8ebe8b4cce035b5ec4157c", -- Do Not Stop
 }
 
 -- Recognize the same games after teleporting between lobbies and mission places.
@@ -262,6 +263,7 @@ local UniverseCatalog = {
 	[5750914919] = "d1cd28f95070997b56f4d836f295715c", -- Fisch
 	[10767012496] = "62b231ab3aeefcfbfa0275dfcad0448e", -- Turbo Soccer
 	[10766972131] = "e63b360b3ef4432784be44dfc06c891f", -- Throw Food For Animals
+	[10772946647] = "7d4ee8ae3a8ebe8b4cce035b5ec4157c", -- Do Not Stop
 }
 
 local function createWindow()
